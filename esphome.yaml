@@ -1,0 +1,233 @@
+esphome:
+  name: esphome-web-e2f3ef
+  friendly_name: ESPHome Web e2f3ef
+  libraries:
+    - Wire
+    - "climateguard/ClimateGuard RadSens"
+  includes:
+    - RadSens/RadSensComponent.h  
+
+esp8266:
+  board: nodemcuv2
+
+globals:
+  - id: "mac_id"
+    type: std::string
+    initial_value: !secret mac_id_for_narodmon
+
+# Enable logging
+logger:
+  level: DEBUG
+  logs:
+    mqtt.component: ERROR
+    mqtt.client: ERROR
+
+# Enable Home Assistant API
+#api:
+mqtt:
+  broker: !secret broker_ip
+  port: !secret broker_port
+  username: !secret broker_username 
+  password: !secret broker_password
+  discovery: true
+  birth_message:
+    topic: $devicename/status
+    payload: online
+  will_message:
+    topic: $devicename/status
+    payload: offline
+
+ota:
+  platform: esphome
+  password: !secret ota_key
+
+http_request:
+  timeout: 4min
+  verify_ssl: false
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: !secret fallback_ssid
+    password: !secret fallback_password
+
+web_server:
+  port: 80
+
+uart:
+  rx_pin: GPIO4
+  tx_pin: GPIO5
+  baud_rate: 9600
+
+i2c:
+    sda: GPIO0
+    scl: GPIO2
+    scan: True
+
+sensor:
+  - platform: bme280_i2c
+    temperature:
+      id: BME280_temperature
+      name: "BME280 Temperature"
+    pressure:
+      id: BME280_pressure
+      name: "BME280 Pressure"
+    humidity:
+      id: BME280_humidity
+      name: "BME280 Humidity"
+    address: 0x76
+    update_interval: 5min
+    
+  - platform: sds011
+    pm_2_5:
+      id: sds011_pm2_5
+      name: "Particulate Matter <2.5µm Concentration"
+    pm_10_0:
+      id: sds011_pm10
+      name: "Particulate Matter <10.0µm Concentration"
+    update_interval: 5min
+
+  - platform: custom
+    lambda: |-
+      auto rad_sens = new RadSensComponent();
+      App.register_component(rad_sens);
+      App.register_sensor(rad_sens->IntensityDynamic_Sensor);
+      return {rad_sens->IntensityDynamic_Sensor, rad_sens->IntensityStatic_Sensor};
+
+
+    sensors:
+      - name: "Dynamic intensity"
+        id: dynamic_intensity
+        accuracy_decimals: 1
+        unit_of_measurement: μR/h
+      - name: "Static intensity"
+        id: static_intensity
+        accuracy_decimals: 1
+        unit_of_measurement: μR/h   
+
+interval:
+  - interval: 4min
+    then:
+      - if:
+          condition:
+            lambda: 'return id(BME280_temperature).has_state();'
+          then:
+            - http_request.post:
+                url: http://api.sensor.community/v1/push-sensor-data/
+                headers:
+                  X-Pin: 11
+                  X-Sensor: !secret sensor_id_for_sensor_community
+                  Content-Type: application/json
+                json: |-
+                    root["software_version"] = "ESPHome " ESPHOME_VERSION;
+                    auto values = root.createNestedArray("sensordatavalues");
+
+                    auto BME280_t = values.createNestedObject();
+                    BME280_t["value_type"] = "temperature";
+                    BME280_t["value"] = id(BME280_temperature).state;
+
+                    auto BME280_h = values.createNestedObject();
+                    BME280_h["value_type"] = "humidity";
+                    BME280_h["value"] = id(BME280_humidity).state;
+
+                    auto BME280_p = values.createNestedObject();
+                    BME280_p["value_type"] = "pressure";
+                    BME280_p["value"] = id(BME280_pressure).state;
+
+      - if:
+          condition:
+            lambda: 'return id(sds011_pm2_5).has_state();'
+          then:
+            - http_request.post:
+                url: http://api.sensor.community/v1/push-sensor-data/
+                headers:
+                  X-Pin: 1
+                  X-Sensor: !secret sensor_id_for_sensor_community  # replace with your sensor ID
+                  Content-Type: application/json
+                json: |-
+                    root["software_version"] = "ESPHome " ESPHOME_VERSION;
+                    auto values = root.createNestedArray("sensordatavalues");
+
+                    auto sds011_p2 = values.createNestedObject();
+                    sds011_p2["value_type"] = "P2";
+                    sds011_p2["value"] = id(sds011_pm2_5).state;
+
+                    auto sds011_p1 = values.createNestedObject();
+                    sds011_p1["value_type"] = "P1";
+                    sds011_p1["value"] = id(sds011_pm10).state;
+      - if:
+          condition:
+            lambda: 'return id(dynamic_intensity).has_state();'
+          then:
+            - http_request.post:
+                url: http://api.sensor.community/v1/push-sensor-data/
+                headers:
+                  X-Pin: 19
+                  X-Sensor: !secret sensor_id_for_sensor_community  # replace with your sensor ID
+                  Content-Type: application/json
+                json: |-
+                    root["software_version"] = "ESPHome " ESPHOME_VERSION;
+                    auto values = root.createNestedArray("sensordatavalues");
+
+                    auto radsens = values.createNestedObject();
+                    radsens["value_type"] = "counts_per_minute";
+                    radsens["value"] = id(dynamic_intensity).state;
+
+  - interval: 15min
+    then: 
+      - http_request.post:
+                url: http://narodmon.com/json
+                headers:
+                  Content-Type: application/json
+                json: |-
+                  auto device = root.createNestedArray("devices").createNestedObject();
+                  device["mac"] = id(mac_id);
+                  auto sensors = device.createNestedArray("sensors");
+
+                  if(id(BME280_temperature).has_state()){
+                     auto temp = sensors.createNestedObject();
+                     temp["id"] = "temperature";
+                     temp["value"] = id(BME280_temperature).state;
+                     temp["name"] = "Температура";
+                     auto humidity = sensors.createNestedObject();
+                     humidity["id"] = "humidity";
+                     humidity["value"] = id(BME280_humidity).state;
+                     humidity["name"] = "Влажность";
+
+                     auto pressure = sensors.createNestedObject();
+                     pressure["id"] = "pressure";
+                     pressure["value"] = id(BME280_pressure).state;
+                     pressure["name"] = "Давление";
+                                
+                  }
+                  if (id(sds011_pm2_5).has_state()){
+                     auto P1 = sensors.createNestedObject();
+                     P1["id"] = "P1";
+                     P1["value"] = id(sds011_pm10).state;
+                     P1["name"] = "Пыль PM10";
+
+                     auto P2 = sensors.createNestedObject();
+                     P2["id"] = "P2";
+                     P2["value"] = id(sds011_pm2_5).state;
+                     P2["name"] = "Пыль PM2.5";
+                  }
+
+                  if (id(dynamic_intensity).has_state()){
+                     auto radiation_dynamic = sensors.createNestedObject();
+                     radiation_dynamic["id"] = "radiation_dynamic";
+                     radiation_dynamic["value"] = id(dynamic_intensity).state;
+                     radiation_dynamic["name"] = "Радиационный фон (динамический)";
+
+                     auto radiation_static = sensors.createNestedObject();
+                     radiation_static["id"] = "radiation_static";
+                     radiation_static["value"] = id(static_intensity).state;
+                     radiation_static["name"] = "Радиационный фон (статический)"; 
+                  }
+                                                    
+                    
+                    
+captive_portal:
+    
